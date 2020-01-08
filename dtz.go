@@ -7,6 +7,7 @@ import (
 	"github.com/antonholmquist/jason"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -48,8 +49,8 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	writeString(w, "<body>\n")
 	writeString(w, "<p>This tool edits the date of files on Wikimedia Commons, based on the dates in Exif and the timezones specified below. It's currently a work in progress.</p>\n")
 	writeString(w, "<form action=\"/dtz/output\" method=\"post\">\n")
-	writeString(w, "Camera timezone <input type=\"text\" name=\"camera\" size=\"10\"><br>\n")
-	writeString(w, "Location timezone <input type=\"text\" name=\"location\" size=\"10\"><br>\n")
+	writeString(w, "Camera timezone <input type=\"text\" name=\"camera\" size=\"50\"><br>\n")
+	writeString(w, "Location timezone <input type=\"text\" name=\"location\" size=\"50\"><br>\n")
 	writeString(w, "First file in range <input type=\"text\" name=\"first\" size=\"60\"><br>\n")
 	writeString(w, "Last file in range <input type=\"text\" name=\"last\" size=\"60\"><br>\n")
 	writeString(w, "Author filter <input type=\"text\" name=\"author\" size=\"50\"><br>\n")
@@ -69,32 +70,56 @@ func editOne(file string, cameraZone, localZone zoneInfo, client *mwclient.Clien
 	return nil
 }
 
-func extractInfo(page *jason.Object) (string, string, error) {
+type imageInfo struct {
+	uploadTime, user, origTime string
+}
+
+func extractInfo(page *jason.Object) (imageInfo, error) {
+	noinfo := imageInfo{}
 	obj, err := page.Object()
 	if err != nil {
-		return "", "", err
+		return noinfo, err
 	}
 	missing, err := obj.GetBoolean("missing")
 	if err == nil && missing {
-		return "", "", fmt.Errorf("File not found")
+		return noinfo, fmt.Errorf("File not found")
 	}
-	imageInfoArray, err := obj.GetObjectArray("imageinfo")
+	infoArray, err := obj.GetObjectArray("imageinfo")
 	if err != nil {
-		return "", "", err
+		return noinfo, err
 	}
-	imageInfo, err := imageInfoArray[0].Object()
+	info, err := infoArray[0].Object()
 	if err != nil {
-		return "", "", err
+		return noinfo, err
 	}
-	timestamp, err := imageInfo.GetString("timestamp")
+	var result imageInfo
+	result.uploadTime, err = info.GetString("timestamp")
 	if err != nil {
-		return "", "", err
+		return noinfo, err
 	}
-	user, err := imageInfo.GetString("user")
+	result.user, err = info.GetString("user")
 	if err != nil {
-		return "", "", err
+		return noinfo, err
 	}
-	return timestamp, user, nil
+	metadata, err := infoArray[0].GetObjectArray("commonmetadata")
+	if err != nil {
+		// metadata is null in some cases
+		return result, nil
+	}
+	for i := 0; i < len(metadata); i++ {
+		name, err := metadata[i].GetString("name")
+		if err != nil {
+			return noinfo, err
+		}
+		if name == "DateTimeOriginal" {
+			result.origTime, err = metadata[i].GetString("value")
+			if err != nil {
+				return noinfo, err
+			}
+			break
+		}
+	}
+	return result, nil
 }
 
 func oauth(client *mwclient.Client) error {
@@ -108,44 +133,151 @@ func oauth(client *mwclient.Client) error {
 	return client.OAuth(consumerToken, consumerSecret, accessToken, accessSecret)
 }
 
-func getImageInfo(first, last string, client *mwclient.Client, w http.ResponseWriter) (string, string, string, string, error) {
+func getImageInfo(first, last string, client *mwclient.Client, w http.ResponseWriter) (imageInfo, imageInfo, error) {
+	noinfo := imageInfo{}
 	params := params.Values{
 		"action":   "query",
 		"titles":   first + "|" + last,
 		"prop":     "imageinfo",
+		"iiprop":   "timestamp|user|commonmetadata",
 		"continue": "",
 	}
 	json, err := client.Get(params)
 	if err != nil {
-		return "", "", "", "", err
+		return noinfo, noinfo, err
 	}
 	pages, err := json.GetObjectArray("query", "pages")
 	if err != nil {
-		return "", "", "", "", err
+		return noinfo, noinfo, err
+	}
+	if len(pages) < 1 {
+		return noinfo, noinfo, fmt.Errorf("Empty pages array when requesting imageinfo")
+	}
+	imageInfo1, err := extractInfo(pages[0])
+	if err != nil {
+		return noinfo, noinfo, err
 	}
 	if len(pages) < 2 {
-		return "", "", "", "", fmt.Errorf("Short pages array when requesting imageinfo")
+		// If we requested the same file twice, we only get one response.
+		return imageInfo1, imageInfo1, nil
 	}
-	timestamp1, user1, err := extractInfo(pages[0])
+	imageInfo2, err := extractInfo(pages[1])
 	if err != nil {
-		return "", "", "", "", err
+		return noinfo, noinfo, err
 	}
-	timestamp2, user2, err := extractInfo(pages[1])
-	if err != nil {
-		return "", "", "", "", err
+	return imageInfo1, imageInfo2, nil
+}
+
+const batchSize = 100
+const commonsPrefix = "https://commons.wikimedia.org/wiki/"
+
+func printTitle(w http.ResponseWriter, title string) {
+	fmt.Fprintf(w, "<a href=\"%s%s\">%s</a> &mdash; ", commonsPrefix, url.PathEscape(title), title)
+}
+
+func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone zoneInfo, client *mwclient.Client, w http.ResponseWriter) {
+	params := params.Values{
+		"generator": "allimages",
+		"gaiuser":   user,
+		"gaisort":   "timestamp",
+		"gaidir":    "ascending",
+		"gailimit":  strconv.Itoa(batchSize),
+		"prop":      "imageinfo",
+		"iiprop":    "timestamp|commonmetadata",
+		"gaistart":  uploadTime1,
 	}
-	return timestamp1, timestamp2, user1, user2, nil
+	query := client.NewQuery(params)
+	for query.Next() {
+		json := query.Resp()
+		pages, err := json.GetObjectArray("query", "pages")
+		if err != nil {
+			writeString(w, "Skipped a batch with missing pages array.<br>\n")
+			continue
+		}
+		if len(pages) == 0 {
+			break
+		}
+		for i, _ := range pages {
+			// need to check that not past end timestamp
+			// need a way to cancel if output not flowing
+			obj, err := pages[i].Object()
+			if err != nil {
+				writeString(w, "Skipped an item with missing pages object.<br>\n")
+				continue
+			}
+			title, err := obj.GetString("title")
+			if err != nil {
+				printTitle(w, title)
+				writeString(w, "Skipped an item with no title.<br>\n")
+				continue
+			}
+			infoArray, err := obj.GetObjectArray("imageinfo")
+			if err != nil {
+				printTitle(w, title)
+				writeString(w, "missing imageinfo array.<br>\n")
+				continue
+			}
+			info, err := infoArray[0].Object()
+			if err != nil {
+				printTitle(w, title)
+				writeString(w, "missing imageinfo object.<br>\n")
+				continue
+			}
+			uploadTime, err := info.GetString("timestamp")
+			if err != nil {
+				printTitle(w, title)
+				writeString(w, "missing upload timestamp.<br>\n")
+				continue
+			}
+			if uploadTime > uploadTime2 {
+				break
+			}
+			printTitle(w, title)
+			metadata, err := infoArray[0].GetObjectArray("commonmetadata")
+			if err != nil {
+				writeString(w, "no commonmetadata.<br>\n")
+				continue
+			}
+			var origTime string
+			for i := 0; i < len(metadata); i++ {
+				name, err := metadata[i].GetString("name")
+				if err != nil {
+					continue
+				}
+				if name == "DateTimeOriginal" {
+					origTime, err = metadata[i].GetString("value")
+					if err != nil {
+						continue
+					}
+					break
+				}
+			}
+			if origTime == "" {
+				writeString(w, "time not found in metadata.<br>\n")
+				continue
+			}
+			writeString(w, "date-time: "+origTime+"<br>\n")
+		}
+	}
+	if query.Err() != nil {
+		writeString(w, "Query returned an error: "+query.Err().Error()+"<br>")
+	}
+	writeString(w, "</body></html>")
 }
 
 func dateParam(param string) (zoneInfo, error) {
+	var nozone zoneInfo
 	if param == "" {
-		return zoneInfo{}, fmt.Errorf("Please set both of the timezone parameters.")
+		return nozone, fmt.Errorf("Please set both of the timezone parameters.")
 	}
 	var result zoneInfo
 	var err error
 	result.mins, err = strconv.Atoi(param)
 	result.numeric = err == nil
 	if err != nil {
+		if strings.Index(param, "/") == -1 {
+			return nozone, fmt.Errorf("Timezone should be either numeric or a tz database zone name.")
+		}
 		result.loc, err = time.LoadLocation(param)
 	}
 	return result, err
@@ -202,33 +334,30 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 		preMessage(w, title, "Please supply at least one file name.\n")
 		return
 	}
-	if last == filePrefix || first == last {
-		err = editOne(first, cameraZone, localZone, client)
-		if err != nil {
-			preError(w, title, err)
-		}
-		preMessage(w, title, "Will process one file only.")
-		return
+	if last == filePrefix {
+		last = first
 	}
-	timestamp1, timestamp2, user1, user2, err := getImageInfo(first, last, client, w)
+	imageInfo1, imageInfo2, err := getImageInfo(first, last, client, w)
 	if err != nil {
 		preError(w, title, err)
 		return
 	}
-	if timestamp1 > timestamp2 {
-		tmp := timestamp1
-		timestamp1 = timestamp2
-		timestamp2 = tmp
+	if imageInfo1.uploadTime > imageInfo2.uploadTime {
+		tmp := imageInfo1
+		imageInfo1 = imageInfo2
+		imageInfo2 = tmp
 	}
-	if user1 != user2 {
+	if imageInfo1.user != imageInfo2.user {
 		preMessage(w, title, "Two files must be uploaded by the same user.\n")
+		return
 	}
 	if author != "" || model != "" {
+		preMessage(w, title, "Filter fields not yet supported.")
+		return
 	}
 	writeHead(w, title)
 	writeString(w, "<body>\n")
-	fmt.Fprintf(w, "<p>Will process the range %s - %s for user %s.</p>\n", timestamp1, timestamp2, user1)
-	writeString(w, "</body></html>")
+	processRange(imageInfo1.uploadTime, imageInfo2.uploadTime, imageInfo1.user, cameraZone, localZone, client, w)
 }
 
 func main() {
