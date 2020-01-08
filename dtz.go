@@ -74,16 +74,11 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	writeString(w, "Last file in range <input type=\"text\" name=\"last\" size=\"60\"></p>\n")
 	writeString(w, "If filters are specified, files will only be processed if the text appears as a substring in either the wiki source of the author field, or in the camera model in Exif. The matching is case insensitive.</p>")
 	writeString(w, "<p>Author filter <input type=\"text\" name=\"author\" size=\"50\"><br>\n")
-	writeString(w, "Camera model filter <input type=\"text\" name=\"model\" size=\"50\"><br>\n")
-	writeString(w, "<input type=\"submit\" value=\"Submit\"></p>\n")
+	writeString(w, "Camera model filter <input type=\"text\" name=\"model\" size=\"50\"></p>\n")
+	writeString(w, "<p>After pressing Submit, it may take some time before output appears. Edits are limited to one per five seconds, and can be examined in real-time at your contributions page at Commons.</p>")
+	writeString(w, "<input type=\"submit\" value=\"Submit\">\n")
 	writeString(w, "</form>\n")
 	writeString(w, "</body></html>")
-}
-
-type zoneInfo struct {
-	numeric bool
-	mins    int
-	loc     *time.Location
 }
 
 type imageInfo struct {
@@ -191,7 +186,7 @@ func printTitle(w http.ResponseWriter, title string) {
 	writeString(w, " &mdash; ")
 }
 
-func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone zoneInfo, client *mwclient.Client, w http.ResponseWriter) {
+func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone *time.Location, client *mwclient.Client, w http.ResponseWriter) {
 	writeString(w, "<p>To stop this thing, press the browser stop button, close the page, or revoke OAuth access at ")
 	writeLink(w, oauthManageURL, "Special:OAuthManageMyGrants")
 	writeString(w, ".</p><p>\n")
@@ -204,7 +199,7 @@ func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone z
 		"prop":      "imageinfo",
 		"iiprop":    "commonmetadata",
 		"gaistart":  uploadTime1,
-		"gaiend":  uploadTime2,
+		"gaiend":    uploadTime2,
 	}
 	flusher, haveFlush := w.(http.Flusher)
 	if !haveFlush {
@@ -267,7 +262,16 @@ queryLoop:
 				writeString(w, "time not found in metadata.<br>\n")
 				continue
 			}
-			err = writeString(w, "date-time: "+origTime+"<br>\n")
+			timeStampFormat := "2006:01:02 15:04:05"
+			origTimeParsed, err := time.ParseInLocation(timeStampFormat, origTime, cameraZone)
+			if err != nil {
+				writeString(w, "failed to parse the timestamp: ")
+				writeString(w, err.Error())
+				writeString(w, "<br>\n")
+				continue
+			}
+			origTimeConverted := origTimeParsed.In(localZone)
+			err = writeString(w, "date-time "+origTimeParsed.Format(timeStampFormat)+" converts to "+origTimeConverted.Format(timeStampFormat)+"<br>\n")
 			if err != nil {
 				// Presumably lost the connection to the browser.
 				break queryLoop
@@ -280,22 +284,20 @@ queryLoop:
 	writeString(w, "</body></html>")
 }
 
-func dateParam(param string) (zoneInfo, error) {
-	var nozone zoneInfo
+func dateParam(param string) (*time.Location, error) {
 	if param == "" {
-		return nozone, fmt.Errorf("Please set both of the timezone parameters.")
+		return nil, fmt.Errorf("Please set both of the timezone parameters.")
 	}
-	var result zoneInfo
-	var err error
-	result.mins, err = strconv.Atoi(param)
-	result.numeric = err == nil
-	if err != nil {
-		if strings.Index(param, "/") == -1 {
-			return nozone, fmt.Errorf("Timezone should be either numeric or a tz database zone name.")
-		}
-		result.loc, err = time.LoadLocation(param)
+	num, err := strconv.Atoi(param)
+	if err == nil {
+		hours := num / 100
+		mins := num % 100
+		return time.FixedZone(param, (hours*60+mins)*60), nil
 	}
-	return result, err
+	if strings.Index(param, "/") == -1 {
+		return nil, fmt.Errorf("Timezone should be either numeric or a tz database zone name.")
+	}
+	return time.LoadLocation(param)
 }
 
 func trimmedField(field string, r *http.Request) string {
