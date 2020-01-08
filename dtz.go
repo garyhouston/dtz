@@ -19,6 +19,11 @@ func writeString(w io.Writer, s string) error {
 	return err
 }
 
+func writeLink(w io.Writer, url, text string) error {
+	_, err := fmt.Fprintf(w, "<a href=\"%s\">%s</a>", url, text)
+	return err
+}
+
 func writeHead(w http.ResponseWriter, title string) {
 	writeString(w, "<!DOCTYPE html>\n")
 	writeString(w, "<html lang=\"en\"><head><title>")
@@ -40,6 +45,9 @@ func preMessage(w http.ResponseWriter, title, msg string) {
 	writeString(w, "</body></html>")
 }
 
+const commonsPrefix = "https://commons.wikimedia.org/wiki/"
+const oauthManageURL = "https://www.mediawiki.org/wiki/Special:OAuthManageMyGrants"
+
 func rootHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/dtz" && r.URL.Path != "/dtz/" {
 		http.Redirect(w, r, "/dtz/", http.StatusSeeOther)
@@ -47,15 +55,27 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	writeHead(w, "dtz")
 	writeString(w, "<body>\n")
-	writeString(w, "<p>This tool edits the date of files on Wikimedia Commons, based on the dates in Exif and the timezones specified below. It's currently a work in progress.</p>\n")
+	writeString(w, "<p>This is a tool under development, it doesn't work yet.</p>")
+	writeString(w, "<p>This tool edits the dates of files on Wikimedia Commons, using the \n")
+	writeLink(w, commonsPrefix+"Template:DTZ", "DTZ")
+	writeString(w, " template to display the dates with timezones. The date/times are taken from Exif and adjusted by the difference between the tizezone set in the camera and timezones at the place the image was created, as specified below.</p>")
 	writeString(w, "<form action=\"/dtz/output\" method=\"post\">\n")
-	writeString(w, "Camera timezone <input type=\"text\" name=\"camera\" size=\"50\"><br>\n")
-	writeString(w, "Location timezone <input type=\"text\" name=\"location\" size=\"50\"><br>\n")
-	writeString(w, "First file in range <input type=\"text\" name=\"first\" size=\"60\"><br>\n")
-	writeString(w, "Last file in range <input type=\"text\" name=\"last\" size=\"60\"><br>\n")
-	writeString(w, "Author filter <input type=\"text\" name=\"author\" size=\"50\"><br>\n")
+	writeString(w, "<p>Timezones can be specified either as a number, in the format HHMM, or as the name of a timezone from the TZ database.\n")
+	writeString(w, "Using the TZ timezones will automatically adjust for daylight savings.\n")
+	writeString(w, "The TZ names have the format \"Africa/Abidjan\"; a list can be found at \n")
+	writeLink(w, "https://en.wikipedia.org/wiki/List_of_tz_database_time_zones", "List of tz database time zones")
+	writeString(w, ".\n")
+	writeString(w, "A numerical value can be positive for eastern timezones and negative for western.\n")
+	writeString(w, "E.g., 1000 for Eastern Australia without daylight savings, or -800 for North American Pacific Time without daylight savings.</p>\n")
+	writeString(w, "<p>Camera timezone <input type=\"text\" name=\"camera\" size=\"50\"><br>\n")
+	writeString(w, "Location timezone <input type=\"text\" name=\"location\" size=\"50\"></p>\n")
+	writeString(w, "<p>Either a single file or a range of files can be edited. A range is obtained by using the upload order from the relevant user on Commons between the two specified files. The order doesn't matter. Note that if multiple files have the same upload timestamp as either the first or last file, all will be processed.\n</p>")
+	writeString(w, "<p>First file in range <input type=\"text\" name=\"first\" size=\"60\"><br>\n")
+	writeString(w, "Last file in range <input type=\"text\" name=\"last\" size=\"60\"></p>\n")
+	writeString(w, "If filters are specified, files will only be processed if the text appears as a substring in either the wiki source of the author field, or in the camera model in Exif. The matching is case insensitive.</p>")
+	writeString(w, "<p>Author filter <input type=\"text\" name=\"author\" size=\"50\"><br>\n")
 	writeString(w, "Camera model filter <input type=\"text\" name=\"model\" size=\"50\"><br>\n")
-	writeString(w, "<input type=\"submit\" value=\"Submit\">\n")
+	writeString(w, "<input type=\"submit\" value=\"Submit\"></p>\n")
 	writeString(w, "</form>\n")
 	writeString(w, "</body></html>")
 }
@@ -64,10 +84,6 @@ type zoneInfo struct {
 	numeric bool
 	mins    int
 	loc     *time.Location
-}
-
-func editOne(file string, cameraZone, localZone zoneInfo, client *mwclient.Client) error {
-	return nil
 }
 
 type imageInfo struct {
@@ -169,13 +185,16 @@ func getImageInfo(first, last string, client *mwclient.Client, w http.ResponseWr
 }
 
 const batchSize = 100
-const commonsPrefix = "https://commons.wikimedia.org/wiki/"
 
 func printTitle(w http.ResponseWriter, title string) {
-	fmt.Fprintf(w, "<a href=\"%s%s\">%s</a> &mdash; ", commonsPrefix, url.PathEscape(title), title)
+	writeLink(w, commonsPrefix+url.PathEscape(title), title)
+	writeString(w, " &mdash; ")
 }
 
 func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone zoneInfo, client *mwclient.Client, w http.ResponseWriter) {
+	writeString(w, "<p>To stop this thing, press the browser stop button, close the page, or revoke OAuth access at ")
+	writeLink(w, oauthManageURL, "Special:OAuthManageMyGrants")
+	writeString(w, ".</p><p>\n")
 	params := params.Values{
 		"generator": "allimages",
 		"gaiuser":   user,
@@ -183,10 +202,17 @@ func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone z
 		"gaidir":    "ascending",
 		"gailimit":  strconv.Itoa(batchSize),
 		"prop":      "imageinfo",
-		"iiprop":    "timestamp|commonmetadata",
+		"iiprop":    "commonmetadata",
 		"gaistart":  uploadTime1,
+		"gaiend":  uploadTime2,
+	}
+	flusher, haveFlush := w.(http.Flusher)
+	if !haveFlush {
+		writeString(w, "Expected a flush method.")
+		return
 	}
 	query := client.NewQuery(params)
+queryLoop:
 	for query.Next() {
 		json := query.Resp()
 		pages, err := json.GetObjectArray("query", "pages")
@@ -198,8 +224,8 @@ func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone z
 			break
 		}
 		for i, _ := range pages {
-			// need to check that not past end timestamp
-			// need a way to cancel if output not flowing
+			time.Sleep(time.Duration(1) * time.Second)
+			flusher.Flush()
 			obj, err := pages[i].Object()
 			if err != nil {
 				writeString(w, "Skipped an item with missing pages object.<br>\n")
@@ -216,21 +242,6 @@ func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone z
 				printTitle(w, title)
 				writeString(w, "missing imageinfo array.<br>\n")
 				continue
-			}
-			info, err := infoArray[0].Object()
-			if err != nil {
-				printTitle(w, title)
-				writeString(w, "missing imageinfo object.<br>\n")
-				continue
-			}
-			uploadTime, err := info.GetString("timestamp")
-			if err != nil {
-				printTitle(w, title)
-				writeString(w, "missing upload timestamp.<br>\n")
-				continue
-			}
-			if uploadTime > uploadTime2 {
-				break
 			}
 			printTitle(w, title)
 			metadata, err := infoArray[0].GetObjectArray("commonmetadata")
@@ -256,7 +267,11 @@ func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone z
 				writeString(w, "time not found in metadata.<br>\n")
 				continue
 			}
-			writeString(w, "date-time: "+origTime+"<br>\n")
+			err = writeString(w, "date-time: "+origTime+"<br>\n")
+			if err != nil {
+				// Presumably lost the connection to the browser.
+				break queryLoop
+			}
 		}
 	}
 	if query.Err() != nil {
