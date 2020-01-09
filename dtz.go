@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -72,7 +73,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	writeString(w, "<p>Either a single file or a range of files can be edited. A range is obtained by using the upload order from the relevant user on Commons between the two specified files. The order doesn't matter. Note that if multiple files have the same upload timestamp as either the first or last file, all will be processed.\n</p>")
 	writeString(w, "<p>First file in range <input type=\"text\" name=\"first\" size=\"60\"><br>\n")
 	writeString(w, "Last file in range <input type=\"text\" name=\"last\" size=\"60\"></p>\n")
-	writeString(w, "If filters are specified, files will only be processed if the text appears as a substring in either the wiki source of the author field, or in the camera model in Exif. The matching is case insensitive.</p>")
+	writeString(w, "If filters are specified, files will only be processed if the text appears as a substring in either the wiki source of the author field, or in the camera model in Exif. The matching is case insensitive. Only the first line of the author field is examined.</p>")
 	writeString(w, "<p>Author filter <input type=\"text\" name=\"author\" size=\"50\"><br>\n")
 	writeString(w, "Camera model filter <input type=\"text\" name=\"model\" size=\"50\"></p>\n")
 	writeString(w, "<p>After pressing Submit, it may take some time before output appears. Edits are limited to one per five seconds, and can be examined in real-time at your contributions page at Commons.</p>")
@@ -181,12 +182,113 @@ func getImageInfo(first, last string, client *mwclient.Client, w http.ResponseWr
 
 const batchSize = 100
 
+// Replace non-parsed sections in text, such as <!-- ... --> blocks, with spaces.
+func blankNonParsedSections(text string) string {
+	// Assume that unparsed sections don't nest, but don't assume
+	// that a matching end tag is present.
+	text = strings.ToLower(text) // Ignore tag case.
+	startTags := []string{"<!--", "<nowiki>", "<pre>", "<math>"}
+	endTags := []string{"-->", "</nowiki>", "</pre>", "</math>"}
+	start := -1
+	startTag := ""
+	endTag := ""
+	// Find the first non-parsed section, if any.
+	for i := 0; i < len(startTags); i++ {
+		pos := strings.Index(text, startTags[i])
+		if pos >= 0 && (start == -1 || pos < start) {
+			start = pos
+			startTag = startTags[i]
+			endTag = endTags[i]
+		}
+
+	}
+	if start >= 0 {
+		// Blank out the non-parsed section.
+		unterminated := false
+		startTagLen := len(startTag)
+		end := strings.Index(text[start+startTagLen:], endTag)
+		if end == -1 {
+			end = len(text)
+			unterminated = true
+		} else {
+			end += start + startTagLen + len(endTag)
+		}
+		text = text[:start] + strings.Repeat(" ", end-start) + text[end:]
+		if !unterminated {
+			return blankNonParsedSections(text)
+		}
+	}
+	return text
+}
+
+func findField(text, field string) (int, int) {
+	regexp := regexp.MustCompile("\\|\\s*" + field + "\\s*=")
+	match := regexp.FindStringIndex(text)
+	if match == nil {
+		return -1, -1
+	}
+	start := match[1]
+	// Just look at the first line of the field. Parsing multi-line fields
+	// properly may be difficult.
+	lineLen := strings.Index(text[start:], "\n")
+	if lineLen == -1 {
+		// Text truncated?
+		return start, len(text)
+	} else {
+		return start, start + lineLen
+	}
+}
+
+// Find the Author and Date fields in page text.
+func findPositions(text string) (int, int, int, int) {
+	text = blankNonParsedSections(text)
+	p1, p2 := findField(text, "author")
+	p3, p4 := findField(text, "date")
+	return p1, p2, p3, p4
+}
+
+func edit(title string, newDate time.Time, lastEdit *time.Time, authorFilter string, client *mwclient.Client) error {
+	// Don't attempt to edit more than once per 5 seconds, per Commons bot policy
+	dur := time.Since(*lastEdit)
+	if dur.Seconds() < 5 {
+		time.Sleep(time.Duration(5)*time.Second - dur)
+	}
+	// There's a small chance that saving a page may fail due to
+	// an edit conflict or other transient error. Try up to 3
+	// times before giving up.
+	var saveError error
+	for i := 0; i < 3; i++ {
+		text, timestamp, err := client.GetPageByName(title)
+		if err != nil {
+			return err
+		}
+		authorStart, authorEnd, dateStart, dateEnd := findPositions(text)
+		if authorFilter != "" {
+			if authorStart == -1 || strings.Index(strings.ToLower(text[authorStart:authorEnd]), authorFilter) == -1 {
+				return fmt.Errorf("author didn't match.")
+			}
+		}
+		if dateStart == -1 || dateEnd == -1 {
+		}
+		if saveError == nil {
+			break
+		}
+		if timestamp == "" {
+		}
+	}
+	if saveError != nil {
+		return fmt.Errorf("failed to save: %v", saveError)
+	}
+	*lastEdit = time.Now()
+	return nil
+}
+
 func printTitle(w http.ResponseWriter, title string) {
 	writeLink(w, commonsPrefix+url.PathEscape(title), title)
 	writeString(w, " &mdash; ")
 }
 
-func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone *time.Location, client *mwclient.Client, w http.ResponseWriter) {
+func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone *time.Location, authorFilter, modelFilter string, client *mwclient.Client, w http.ResponseWriter) {
 	writeString(w, "<p>To stop this thing, press the browser stop button, close the page, or revoke OAuth access at ")
 	writeLink(w, oauthManageURL, "Special:OAuthManageMyGrants")
 	writeString(w, ".</p><p>\n")
@@ -206,6 +308,7 @@ func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone *
 		writeString(w, "Expected a flush method.")
 		return
 	}
+	var lastEdit time.Time
 	query := client.NewQuery(params)
 queryLoop:
 	for query.Next() {
@@ -245,21 +348,28 @@ queryLoop:
 				continue
 			}
 			var origTime string
+			var model string
 			for i := 0; i < len(metadata); i++ {
 				name, err := metadata[i].GetString("name")
 				if err != nil {
 					continue
 				}
 				if name == "DateTimeOriginal" {
-					origTime, err = metadata[i].GetString("value")
+					origTime, _ = metadata[i].GetString("value")
+				} else if name == "Model" {
+					model, _ = metadata[i].GetString("value")
 					if err != nil {
 						continue
 					}
-					break
 				}
 			}
 			if origTime == "" {
 				writeString(w, "time not found in metadata.<br>\n")
+				continue
+			}
+			model = strings.ToLower(model)
+			if modelFilter != "" && model != "" && strings.Index(model, modelFilter) == -1 {
+				writeString(w, "camera model didn't match.<br>\n")
 				continue
 			}
 			timeStampFormat := "2006:01:02 15:04:05"
@@ -271,6 +381,11 @@ queryLoop:
 				continue
 			}
 			origTimeConverted := origTimeParsed.In(localZone)
+			err = edit(title, origTimeConverted, &lastEdit, authorFilter, client)
+			if err != nil {
+				writeString(w, err.Error()+"<br>\n")
+				continue
+			}
 			err = writeString(w, "date-time "+origTimeParsed.Format(timeStampFormat)+" converts to "+origTimeConverted.Format(timeStampFormat)+"<br>\n")
 			if err != nil {
 				// Presumably lost the connection to the browser.
@@ -342,8 +457,8 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 	if len(last) < prefixLen || last[0:prefixLen] != filePrefix {
 		last = filePrefix + last
 	}
-	author := trimmedField("author", r)
-	model := trimmedField("model", r)
+	authorFilter := strings.ToLower(trimmedField("author", r))
+	modelFilter := strings.ToLower(trimmedField("model", r))
 	if first == filePrefix {
 		first = last
 	}
@@ -368,13 +483,9 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 		preMessage(w, title, "Two files must be uploaded by the same user.\n")
 		return
 	}
-	if author != "" || model != "" {
-		preMessage(w, title, "Filter fields not yet supported.")
-		return
-	}
 	writeHead(w, title)
 	writeString(w, "<body>\n")
-	processRange(imageInfo1.uploadTime, imageInfo2.uploadTime, imageInfo1.user, cameraZone, localZone, client, w)
+	processRange(imageInfo1.uploadTime, imageInfo2.uploadTime, imageInfo1.user, cameraZone, localZone, authorFilter, modelFilter, client, w)
 }
 
 func main() {
