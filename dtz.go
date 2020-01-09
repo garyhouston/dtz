@@ -367,10 +367,11 @@ queryLoop:
 				writeString(w, "time not found in metadata.<br>\n")
 				continue
 			}
-			model = strings.ToLower(model)
-			if modelFilter != "" && model != "" && strings.Index(model, modelFilter) == -1 {
-				writeString(w, "camera model didn't match.<br>\n")
-				continue
+			if modelFilter != "" {
+				if model == "" || strings.Index(strings.ToLower(model), modelFilter) == -1 {
+					writeString(w, "camera model didn't match.<br>\n")
+					continue
+				}
 			}
 			timeStampFormat := "2006:01:02 15:04:05"
 			origTimeParsed, err := time.ParseInLocation(timeStampFormat, origTime, cameraZone)
