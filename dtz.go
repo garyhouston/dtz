@@ -268,12 +268,21 @@ func edit(title string, newDate time.Time, lastEdit *time.Time, authorFilter str
 				return fmt.Errorf("author didn't match.")
 			}
 		}
-		if dateStart == -1 || dateEnd == -1 {
+		dateStr := fmt.Sprintf("{{DTZ|%s}}", newDate.Format("2006-01-02T15:04:05-07"))
+		newText := text[:dateStart] + dateStr + text[dateEnd:]
+		if newText == text {
+			return fmt.Errorf("no change needed")
 		}
+		editcfg := map[string]string{
+			"action":        "edit",
+			"title":         title,
+			"text":          newText,
+			"summary":       "Set date from Exif with time zone",
+			"basetimestamp": timestamp,
+		}
+		saveError = client.Edit(editcfg)
 		if saveError == nil {
 			break
-		}
-		if timestamp == "" {
 		}
 	}
 	if saveError != nil {
@@ -387,7 +396,7 @@ queryLoop:
 				writeString(w, err.Error()+"<br>\n")
 				continue
 			}
-			err = writeString(w, "date-time "+origTimeParsed.Format(timeStampFormat)+" converts to "+origTimeConverted.Format(timeStampFormat)+"<br>\n")
+			err = writeString(w, "date-time "+origTimeParsed.Format(timeStampFormat)+" converted to "+origTimeConverted.Format(timeStampFormat)+"<br>\n")
 			if err != nil {
 				// Presumably lost the connection to the browser.
 				break queryLoop
