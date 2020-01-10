@@ -79,9 +79,13 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	writeString(w, " or the author's ")
 	writeLink(w, talkURL, "talk page")
 	writeString(w, " at Wikimedia Commons.</p>\n")
-	writeString(w, "<p>Enable this application with OAuth: ")
-	writeLink(w, "/dtz/auth", "authorize")
-	writeString(w, "</p>\n")
+	if oauthVerifier == "" {
+		writeString(w, "<p>Enable this application with OAuth: ")
+		writeLink(w, "/dtz/auth", "authorize")
+		writeString(w, "</p>\n")
+	} else {
+		writeString(w, "<p>OAuth appears to be enabled.</p>")
+	}
 	writeString(w, "<p>This tool edits the dates of files on Wikimedia Commons, using the \n")
 	writeLink(w, commonsPrefix+"Template:DTZ", "DTZ")
 	writeString(w, " template to display the dates with timezones. The date/times are taken from Exif and adjusted by the difference between the tizezone set in the camera and timezones at the place the image was created, as specified below.</p>")
