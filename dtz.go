@@ -3,9 +3,14 @@ package main
 import (
 	mwclient "cgt.name/pkg/go-mwclient"
 	"cgt.name/pkg/go-mwclient/params"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"github.com/antonholmquist/jason"
+	"github.com/mrjones/oauth"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -47,16 +52,36 @@ func preMessage(w http.ResponseWriter, title, msg string) {
 }
 
 const commonsPrefix = "https://commons.wikimedia.org/wiki/"
+const oauthRequestURL = "https://www.mediawiki.org/wiki/Special:OAuth/initiate"
+const oauthAuthorizeURL = "https://www.mediawiki.org/wiki/Special:OAuth/authorize"
+const oauthAccessURL = "https://www.mediawiki.org/wiki/Special:OAuth/token"
 const oauthManageURL = "https://www.mediawiki.org/wiki/Special:OAuthManageMyGrants"
+const gitURL = "https://github.com/garyhouston/dtz"
+const talkURL = "https://commons.wikimedia.org/wiki/User_talk:Ghouston"
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/dtz" && r.URL.Path != "/dtz/" {
 		http.Redirect(w, r, "/dtz/", http.StatusSeeOther)
 		return
 	}
+	title := "dtz"
+	err := r.ParseForm()
+	if err != nil {
+		preError(w, title, err)
+		return
+	}
+	oauthToken := r.Form.Get("oauth_token")
+	oauthVerifier := r.Form.Get("oauth_verifier")
 	writeHead(w, "dtz")
 	writeString(w, "<body>\n")
-	writeString(w, "<p>This is a tool under development, it doesn't work yet.</p>")
+	writeString(w, "<p>This is a tool under development. For discussion, use the source code repository at ")
+	writeLink(w, gitURL, "github")
+	writeString(w, " or the author's ")
+	writeLink(w, talkURL, "talk page")
+	writeString(w, " at Wikimedia Commons.</p>\n")
+	writeString(w, "<p>Enable this application with OAuth: ")
+	writeLink(w, "/dtz/auth", "authorize")
+	writeString(w, "</p>\n")
 	writeString(w, "<p>This tool edits the dates of files on Wikimedia Commons, using the \n")
 	writeLink(w, commonsPrefix+"Template:DTZ", "DTZ")
 	writeString(w, " template to display the dates with timezones. The date/times are taken from Exif and adjusted by the difference between the tizezone set in the camera and timezones at the place the image was created, as specified below.</p>")
@@ -76,8 +101,12 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	writeString(w, "If filters are specified, files will only be processed if the text appears as a substring in either the wiki source of the author field, or in the camera model in Exif. The matching is case insensitive. Only the first line of the author field is examined.</p>")
 	writeString(w, "<p>Author filter <input type=\"text\" name=\"author\" size=\"50\"><br>\n")
 	writeString(w, "Camera model filter <input type=\"text\" name=\"model\" size=\"50\"></p>\n")
-	writeString(w, "<p>After pressing Submit, it may take some time before output appears. Edits are limited to one per five seconds, and can be examined in real-time at your contributions page at Commons.</p>")
+	writeString(w, "<p>After pressing Submit, it may take some time before output appears. Edits are limited to one per five seconds, and can be examined in real-time at your contributions page at Commons. If you need to stop the tool, press the browser stop button, close the page, or revoke OAuth access at ")
+	writeLink(w, oauthManageURL, "Special:OAuthManageMyGrants")
+	writeString(w, "</p>\n")
 	writeString(w, "<input type=\"submit\" value=\"Submit\">\n")
+	fmt.Fprintf(w, "<input type=\"hidden\" name=\"oauthtoken\" value=\"%s\">\n", oauthToken)
+	fmt.Fprintf(w, "<input type=\"hidden\" name=\"oauthverifier\" value=\"%s\">\n", oauthVerifier)
 	writeString(w, "</form>\n")
 	writeString(w, "</body></html>")
 }
@@ -132,17 +161,6 @@ func extractInfo(page *jason.Object) (imageInfo, error) {
 		}
 	}
 	return result, nil
-}
-
-func oauth(client *mwclient.Client) error {
-	consumerToken := os.Getenv("ConsumerToken")
-	consumerSecret := os.Getenv("ConsumerSecret")
-	accessToken := os.Getenv("AccessToken")
-	accessSecret := os.Getenv("AccessSecret")
-	if consumerToken == "" || consumerSecret == "" || accessToken == "" || accessSecret == "" {
-		return fmt.Errorf("OAuth tokens not set")
-	}
-	return client.OAuth(consumerToken, consumerSecret, accessToken, accessSecret)
 }
 
 func getImageInfo(first, last string, client *mwclient.Client, w http.ResponseWriter) (imageInfo, imageInfo, error) {
@@ -298,7 +316,7 @@ func printTitle(w http.ResponseWriter, title string) {
 }
 
 func processRange(uploadTime1, uploadTime2, user string, cameraZone, localZone *time.Location, authorFilter, modelFilter string, client *mwclient.Client, w http.ResponseWriter) {
-	writeString(w, "<p>To stop this thing, press the browser stop button, close the page, or revoke OAuth access at ")
+	writeString(w, "<p>To stop this tool, press the browser stop button, close the page, or revoke OAuth access at ")
 	writeLink(w, oauthManageURL, "Special:OAuthManageMyGrants")
 	writeString(w, ".</p><p>\n")
 	params := params.Values{
@@ -442,10 +460,14 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client.Maxlag.On = true
-	err = oauth(client)
-	if err != nil {
-		preError(w, title, err)
-		return
+	oauthToken := r.Form.Get("oauthtoken")
+	oauthVerifier := r.Form.Get("oauthverifier")
+	if oauthToken != "" && oauthVerifier != "" {
+		err = authClient(client, oauthToken, oauthVerifier)
+		if err != nil {
+			preError(w, title, err)
+			return
+		}
 	}
 	cameraZone, err := dateParam(trimmedField("camera", r))
 	if err != nil {
@@ -498,6 +520,81 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 	processRange(imageInfo1.uploadTime, imageInfo2.uploadTime, imageInfo1.user, cameraZone, localZone, authorFilter, modelFilter, client, w)
 }
 
+func loadPrivateKey() (*rsa.PrivateKey, error) {
+	keyFile := os.Getenv("PrivateKeyFile")
+	if keyFile == "" {
+		return nil, fmt.Errorf("PrivateKeyFile not set in environment")
+	}
+	bytes, err := ioutil.ReadFile(keyFile)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(bytes)
+	if block == nil || block.Type != "PRIVATE KEY" {
+		return nil, fmt.Errorf("Failed to parse PEM private key")
+	}
+	pk, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	pkey, ok := pk.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("Failed to typecast public key")
+	}
+	return pkey, nil
+}
+
+func authHandler(w http.ResponseWriter, r *http.Request) {
+	title := "dtz auth"
+	err := r.ParseForm()
+	if err != nil {
+		preError(w, title, err)
+		return
+	}
+	consumerToken := os.Getenv("ConsumerToken")
+	if consumerToken == "" {
+		preMessage(w, title, "OAuth consumer token not set in environment")
+		return
+	}
+	rsaKey, err := loadPrivateKey()
+	if err != nil {
+		preError(w, title, err)
+		return
+	}
+	consumer := oauth.NewRSAConsumer(
+		consumerToken,
+		rsaKey,
+		oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
+	/*requestToken*/ _, url, err := consumer.GetRequestTokenAndUrl("oob")
+	if err != nil {
+		preError(w, title, err)
+		return
+	}
+	http.Redirect(w, r, url, http.StatusSeeOther)
+}
+
+func authClient(client *mwclient.Client, oauthToken, oauthVerifier string) error {
+
+	consumerToken := os.Getenv("ConsumerToken")
+	if consumerToken == "" {
+		return fmt.Errorf("OAuth consumer token not set in environment")
+	}
+	rsaKey, err := loadPrivateKey()
+	if err != nil {
+		return err
+	}
+	consumer := oauth.NewRSAConsumer(consumerToken, rsaKey, oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
+	access, err := consumer.AuthorizeToken(&oauth.RequestToken{Token: oauthToken}, oauthVerifier)
+	if err != nil {
+		return err
+	}
+	httpc, err := consumer.MakeHttpClient(access)
+	if err != nil {
+		return err
+	}
+	return client.ReplaceHTTPC(httpc)
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -506,6 +603,7 @@ func main() {
 	}
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/dtz/output", outputHandler)
+	http.HandleFunc("/dtz/auth", authHandler)
 
 	err := http.ListenAndServe(":"+port, nil)
 	if err != nil {
