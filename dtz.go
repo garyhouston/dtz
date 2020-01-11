@@ -578,7 +578,6 @@ func authHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func authClient(client *mwclient.Client, oauthToken, oauthVerifier string) error {
-
 	consumerToken := os.Getenv("ConsumerToken")
 	if consumerToken == "" {
 		return fmt.Errorf("OAuth consumer token not set in environment")
@@ -596,7 +595,8 @@ func authClient(client *mwclient.Client, oauthToken, oauthVerifier string) error
 	if err != nil {
 		return err
 	}
-	return client.ReplaceHTTPC(httpc)
+	client.SetHTTPClient(httpc)
+	return nil
 }
 
 func main() {
