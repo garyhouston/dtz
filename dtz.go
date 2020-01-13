@@ -63,7 +63,7 @@ const tokenCookie = "dtz_token"
 const secretCookie = "dtz_secret"
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != toolRelative && r.URL.Path != "/dtz" {
+	if r.URL.Path != toolRelative {
 		http.Redirect(w, r, "/dtz/", http.StatusSeeOther)
 		return
 	}
