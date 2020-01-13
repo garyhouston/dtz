@@ -58,9 +58,12 @@ const oauthAccessURL = "https://www.mediawiki.org/wiki/Special:OAuth/token"
 const oauthManageURL = "https://www.mediawiki.org/wiki/Special:OAuthManageMyGrants"
 const gitURL = "https://github.com/garyhouston/dtz"
 const talkURL = "https://commons.wikimedia.org/wiki/User_talk:Ghouston"
+const toolRelative = "/dtz/"
+const tokenCookie = "dtz_token"
+const secretCookie = "dtz_secret"
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/dtz" && r.URL.Path != "/dtz/" {
+	if r.URL.Path != toolRelative && r.URL.Path != "/dtz" {
 		http.Redirect(w, r, "/dtz/", http.StatusSeeOther)
 		return
 	}
@@ -72,6 +75,20 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	oauthToken := r.Form.Get("oauth_token")
 	oauthVerifier := r.Form.Get("oauth_verifier")
+	if oauthToken != "" && oauthVerifier != "" {
+		accessToken, accessSecret, err := authGetAccess(oauthToken, oauthVerifier)
+		if err != nil {
+			preError(w, title, err)
+			return
+		}
+		// Storing the tokens in cookies isn't ideal, since they can be read
+		// by any tool on the same domain. But I don't think they are useful
+		// without also knowing the consumer secret.
+		http.SetCookie(w, &http.Cookie{Name: tokenCookie, Path: toolRelative, Value: accessToken, HttpOnly: true, Secure: true})
+		http.SetCookie(w, &http.Cookie{Name: secretCookie, Path: toolRelative, Value: accessSecret, HttpOnly: true, Secure: true})
+		http.Redirect(w, r, toolRelative, http.StatusSeeOther)
+		return
+	}
 	writeHead(w, "dtz")
 	writeString(w, "<body>\n")
 	writeString(w, "<p>This is a tool under development. For discussion, use the source code repository at ")
@@ -79,12 +96,14 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	writeString(w, " or the author's ")
 	writeLink(w, talkURL, "talk page")
 	writeString(w, " at Wikimedia Commons.</p>\n")
-	if oauthVerifier == "" {
-		writeString(w, "<p>Enable this application with OAuth: ")
-		writeLink(w, "/dtz/auth", "authorize")
+	if _, err := r.Cookie(tokenCookie); err == nil {
+		writeString(w, "<p>OAuth appears to be enabled. ")
+		writeLink(w, toolRelative+"logout", "Logout")
 		writeString(w, "</p>\n")
 	} else {
-		writeString(w, "<p>OAuth appears to be enabled.</p>")
+		writeString(w, "<p>Enable this application with OAuth: ")
+		writeLink(w, toolRelative+"auth", "authorize")
+		writeString(w, "</p>\n")
 	}
 	writeString(w, "<p>This tool edits the dates of files on Wikimedia Commons, using the \n")
 	writeLink(w, commonsPrefix+"Template:DTZ", "DTZ")
@@ -109,8 +128,6 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	writeLink(w, oauthManageURL, "Special:OAuthManageMyGrants")
 	writeString(w, "</p>\n")
 	writeString(w, "<input type=\"submit\" value=\"Submit\">\n")
-	fmt.Fprintf(w, "<input type=\"hidden\" name=\"oauthtoken\" value=\"%s\">\n", oauthToken)
-	fmt.Fprintf(w, "<input type=\"hidden\" name=\"oauthverifier\" value=\"%s\">\n", oauthVerifier)
 	writeString(w, "</form>\n")
 	writeString(w, "</body></html>")
 }
@@ -464,14 +481,20 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client.Maxlag.On = true
-	oauthToken := r.Form.Get("oauthtoken")
-	oauthVerifier := r.Form.Get("oauthverifier")
-	if oauthToken != "" && oauthVerifier != "" {
-		err = authClient(client, oauthToken, oauthVerifier)
-		if err != nil {
-			preError(w, title, err)
-			return
-		}
+	accessToken, err := r.Cookie(tokenCookie)
+	if err != nil {
+		preMessage(w, title, "Cookie "+tokenCookie+" not set for OAuth")
+		return
+	}
+	accessSecret, err := r.Cookie(secretCookie)
+	if err != nil {
+		preMessage(w, title, "Cookie "+secretCookie+" not set for OAuth")
+		return
+	}
+	err = authClient(client, accessToken.Value, accessSecret.Value)
+	if err != nil {
+		preError(w, title, err)
+		return
 	}
 	cameraZone, err := dateParam(trimmedField("camera", r))
 	if err != nil {
@@ -577,7 +600,13 @@ func authHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, url, http.StatusSeeOther)
 }
 
-func authClient(client *mwclient.Client, oauthToken, oauthVerifier string) error {
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: tokenCookie, Path: toolRelative, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: secretCookie, Path: toolRelative, MaxAge: -1})
+	http.Redirect(w, r, toolRelative, http.StatusSeeOther)
+}
+
+func authClient(client *mwclient.Client, oauthToken, oauthSecret string) error {
 	consumerToken := os.Getenv("ConsumerToken")
 	if consumerToken == "" {
 		return fmt.Errorf("OAuth consumer token not set in environment")
@@ -587,16 +616,29 @@ func authClient(client *mwclient.Client, oauthToken, oauthVerifier string) error
 		return err
 	}
 	consumer := oauth.NewRSAConsumer(consumerToken, rsaKey, oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
-	access, err := consumer.AuthorizeToken(&oauth.RequestToken{Token: oauthToken}, oauthVerifier)
-	if err != nil {
-		return err
-	}
-	httpc, err := consumer.MakeHttpClient(access)
+	httpc, err := consumer.MakeHttpClient(&oauth.AccessToken{Token: oauthToken, Secret: oauthSecret})
 	if err != nil {
 		return err
 	}
 	client.SetHTTPClient(httpc)
 	return nil
+}
+
+func authGetAccess(token, verifier string) (string, string, error) {
+	consumerToken := os.Getenv("ConsumerToken")
+	if consumerToken == "" {
+		return "", "", fmt.Errorf("OAuth consumer token not set in environment")
+	}
+	rsaKey, err := loadPrivateKey()
+	if err != nil {
+		return "", "", err
+	}
+	consumer := oauth.NewRSAConsumer(consumerToken, rsaKey, oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
+	access, err := consumer.AuthorizeToken(&oauth.RequestToken{Token: token}, verifier)
+	if err != nil {
+		return "", "", err
+	}
+	return access.Token, access.Secret, nil
 }
 
 func main() {
@@ -606,8 +648,9 @@ func main() {
 		return
 	}
 	http.HandleFunc("/", rootHandler)
-	http.HandleFunc("/dtz/output", outputHandler)
-	http.HandleFunc("/dtz/auth", authHandler)
+	http.HandleFunc(toolRelative+"output", outputHandler)
+	http.HandleFunc(toolRelative+"auth", authHandler)
+	http.HandleFunc(toolRelative+"logout", logoutHandler)
 
 	err := http.ListenAndServe(":"+port, nil)
 	if err != nil {
