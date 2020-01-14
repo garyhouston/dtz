@@ -511,13 +511,14 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filePrefix := "File:"
-	prefixLen := len(filePrefix)
 	first := trimmedField("first", r)
-	if len(first) < prefixLen || first[0:prefixLen] != filePrefix {
+	first = strings.TrimPrefix(first, commonsPrefix)
+	if !strings.HasPrefix(first, filePrefix) {
 		first = filePrefix + first
 	}
 	last := trimmedField("last", r)
-	if len(last) < prefixLen || last[0:prefixLen] != filePrefix {
+	last = strings.TrimPrefix(last, commonsPrefix)
+	if !strings.HasPrefix(last, filePrefix) {
 		last = filePrefix + last
 	}
 	authorFilter := strings.ToLower(trimmedField("author", r))
