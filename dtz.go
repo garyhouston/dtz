@@ -59,12 +59,15 @@ const oauthManageURL = "https://www.mediawiki.org/wiki/Special:OAuthManageMyGran
 const gitURL = "https://github.com/garyhouston/dtz"
 const talkURL = "https://commons.wikimedia.org/wiki/User_talk:Ghouston"
 const toolRelative = "/dtz/"
+const outputRelative = toolRelative + "output"
+const authRelative = toolRelative + "auth"
+const logoutRelative = toolRelative + "logout"
 const tokenCookie = "dtz_token"
 const secretCookie = "dtz_secret"
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != toolRelative {
-		http.Redirect(w, r, "/dtz/", http.StatusSeeOther)
+		http.Redirect(w, r, toolRelative, http.StatusSeeOther)
 		return
 	}
 	title := "dtz"
@@ -91,11 +94,11 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	writeHead(w, "dtz")
 	writeString(w, "<body>\n")
-	writeString(w, "<p>This is a tool under development. For discussion, use the source code repository at ")
-	writeLink(w, gitURL, "github")
-	writeString(w, " or the author's ")
-	writeLink(w, talkURL, "talk page")
-	writeString(w, " at Wikimedia Commons.</p>\n")
+	writeString(w, "<p>DTZ: Set dates and times of files on Commons &mdash; ")
+	writeLink(w, gitURL, "source code at github")
+	writeString(w, "\n&mdash; ")
+	writeLink(w, talkURL, "author's talk page")
+	writeString(w, ".</p>\n")
 	if _, err := r.Cookie(tokenCookie); err == nil {
 		writeString(w, "<p>OAuth appears to be enabled. ")
 		writeLink(w, toolRelative+"logout", "Logout")
@@ -105,26 +108,27 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		writeLink(w, toolRelative+"auth", "authorize")
 		writeString(w, "</p>\n")
 	}
-	writeString(w, "<p>This tool edits the dates of files on Wikimedia Commons, using the \n")
+	writeString(w, "<p>This tool edits the dates and times of files on Wikimedia Commons,\nusing the ")
 	writeLink(w, commonsPrefix+"Template:DTZ", "DTZ")
-	writeString(w, " template to display the dates with timezones. The date/times are taken from Exif and adjusted by the difference between the tizezone set in the camera and timezones at the place the image was created, as specified below.</p>")
-	writeString(w, "<form action=\"/dtz/output\" method=\"post\">\n")
+	writeString(w, " template to display timezones.\nThe date/times are taken from Exif and adjusted by the difference between the tizezone set in the camera\nand the timezone at the place the image was created, as specified below.</p>\n")
+	writeString(w, "<form action=\"")
+	writeString(w, outputRelative)
+	writeString(w, "\" method=\"post\">\n")
 	writeString(w, "<p>Timezones can be specified either as a number, in the format HHMM, or as the name of a timezone from the TZ database.\n")
-	writeString(w, "Using the TZ timezones will automatically adjust for daylight savings.\n")
-	writeString(w, "The TZ names have the format \"Africa/Abidjan\"; a list can be found at \n")
+	writeString(w, "Using the TZ timezones will automatically adjust for daylight savings. The TZ names have the format\n\"Africa/Abidjan\"; a list can be found at \n")
 	writeLink(w, "https://en.wikipedia.org/wiki/List_of_tz_database_time_zones", "List of tz database time zones")
 	writeString(w, ".\n")
 	writeString(w, "A numerical value can be positive for eastern timezones and negative for western.\n")
 	writeString(w, "E.g., 1000 for Eastern Australia without daylight savings, or -800 for North American Pacific Time without daylight savings.</p>\n")
 	writeString(w, "<p>Camera timezone <input type=\"text\" name=\"camera\" size=\"50\"><br>\n")
 	writeString(w, "Location timezone <input type=\"text\" name=\"location\" size=\"50\"></p>\n")
-	writeString(w, "<p>Either a single file or a range of files can be edited. A range is obtained by using the upload order from the relevant user on Commons between the two specified files. The order doesn't matter. Note that if multiple files have the same upload timestamp as either the first or last file, all will be processed.\n</p>")
+	writeString(w, "<p>Either a single file or a range of files can be edited. A range is obtained by using the upload order from the relevant user on\nCommons between the two specified files. The order doesn't matter. Note that if multiple files have the\nsame upload timestamp as either the first or last file, all will be processed.</p>\n")
 	writeString(w, "<p>First file in range <input type=\"text\" name=\"first\" size=\"60\"><br>\n")
 	writeString(w, "Last file in range <input type=\"text\" name=\"last\" size=\"60\"></p>\n")
-	writeString(w, "If filters are specified, files will only be processed if the text appears as a substring in either the wiki source of the author field, or in the camera model in Exif. The matching is case insensitive. Only the first line of the author field is examined.</p>")
+	writeString(w, "If filters are specified, files will only be processed if the text appears as a substring in either the wiki source of the author\nfield, or in the camera model in Exif. The matching is case insensitive. Only the first line of the\nauthor field is examined.</p>\n")
 	writeString(w, "<p>Author filter <input type=\"text\" name=\"author\" size=\"50\"><br>\n")
 	writeString(w, "Camera model filter <input type=\"text\" name=\"model\" size=\"50\"></p>\n")
-	writeString(w, "<p>After pressing Submit, it may take some time before output appears. Edits are limited to one per five seconds, and can be examined in real-time at your contributions page at Commons. If you need to stop the tool, press the browser stop button, close the page, or revoke OAuth access at ")
+	writeString(w, "<p>After pressing Submit, it may take some time before output appears. Edits are limited to one per five seconds, and can be\nexamined in real-time at your contributions page at Commons. If you need to stop the tool, press the\nbrowser stop button, close the page, or revoke OAuth access at\n")
 	writeLink(w, oauthManageURL, "Special:OAuthManageMyGrants")
 	writeString(w, "</p>\n")
 	writeString(w, "<input type=\"submit\" value=\"Submit\">\n")
@@ -648,9 +652,9 @@ func main() {
 		return
 	}
 	http.HandleFunc("/", rootHandler)
-	http.HandleFunc(toolRelative+"output", outputHandler)
-	http.HandleFunc(toolRelative+"auth", authHandler)
-	http.HandleFunc(toolRelative+"logout", logoutHandler)
+	http.HandleFunc(outputRelative, outputHandler)
+	http.HandleFunc(authRelative, authHandler)
+	http.HandleFunc(logoutRelative, logoutHandler)
 
 	err := http.ListenAndServe(":"+port, nil)
 	if err != nil {
