@@ -101,11 +101,11 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	writeString(w, ".</p>\n")
 	if _, err := r.Cookie(tokenCookie); err == nil {
 		writeString(w, "<p>OAuth appears to be enabled. ")
-		writeLink(w, toolRelative+"logout", "Logout")
+		writeLink(w, logoutRelative, "Logout")
 		writeString(w, "</p>\n")
 	} else {
 		writeString(w, "<p>Enable this application with OAuth: ")
-		writeLink(w, toolRelative+"auth", "authorize")
+		writeLink(w, authRelative, "authorize")
 		writeString(w, "</p>\n")
 	}
 	writeString(w, "<p>This tool edits the dates and times of files on Wikimedia Commons,\nusing the ")
