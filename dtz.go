@@ -66,10 +66,6 @@ const tokenCookie = "dtz_token"
 const secretCookie = "dtz_secret"
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != toolRelative {
-		http.Redirect(w, r, toolRelative, http.StatusSeeOther)
-		return
-	}
 	title := "dtz"
 	err := r.ParseForm()
 	if err != nil {
@@ -89,6 +85,10 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		// without also knowing the consumer secret.
 		http.SetCookie(w, &http.Cookie{Name: tokenCookie, Path: toolRelative, Value: accessToken, HttpOnly: true, Secure: true})
 		http.SetCookie(w, &http.Cookie{Name: secretCookie, Path: toolRelative, Value: accessSecret, HttpOnly: true, Secure: true})
+		http.Redirect(w, r, toolRelative, http.StatusSeeOther)
+		return
+	}
+	if r.URL.Path != toolRelative {
 		http.Redirect(w, r, toolRelative, http.StatusSeeOther)
 		return
 	}
