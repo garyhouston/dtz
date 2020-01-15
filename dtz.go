@@ -65,6 +65,9 @@ const logoutRelative = toolRelative + "logout"
 const tokenCookie = "dtz_token"
 const secretCookie = "dtz_secret"
 
+// Immutable once loaded in main().
+var privateKey *rsa.PrivateKey
+
 func rootHandler(w http.ResponseWriter, r *http.Request) {
 	title := "dtz"
 	err := r.ParseForm()
@@ -588,14 +591,9 @@ func authHandler(w http.ResponseWriter, r *http.Request) {
 		preMessage(w, title, "OAuth consumer token not set in environment")
 		return
 	}
-	rsaKey, err := loadPrivateKey()
-	if err != nil {
-		preError(w, title, err)
-		return
-	}
 	consumer := oauth.NewRSAConsumer(
 		consumerToken,
-		rsaKey,
+		privateKey,
 		oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
 	/*requestToken*/ _, url, err := consumer.GetRequestTokenAndUrl("oob")
 	if err != nil {
@@ -616,11 +614,7 @@ func authClient(client *mwclient.Client, oauthToken, oauthSecret string) error {
 	if consumerToken == "" {
 		return fmt.Errorf("OAuth consumer token not set in environment")
 	}
-	rsaKey, err := loadPrivateKey()
-	if err != nil {
-		return err
-	}
-	consumer := oauth.NewRSAConsumer(consumerToken, rsaKey, oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
+	consumer := oauth.NewRSAConsumer(consumerToken, privateKey, oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
 	httpc, err := consumer.MakeHttpClient(&oauth.AccessToken{Token: oauthToken, Secret: oauthSecret})
 	if err != nil {
 		return err
@@ -634,11 +628,7 @@ func authGetAccess(token, verifier string) (string, string, error) {
 	if consumerToken == "" {
 		return "", "", fmt.Errorf("OAuth consumer token not set in environment")
 	}
-	rsaKey, err := loadPrivateKey()
-	if err != nil {
-		return "", "", err
-	}
-	consumer := oauth.NewRSAConsumer(consumerToken, rsaKey, oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
+	consumer := oauth.NewRSAConsumer(consumerToken, privateKey, oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
 	access, err := consumer.AuthorizeToken(&oauth.RequestToken{Token: token}, verifier)
 	if err != nil {
 		return "", "", err
@@ -652,13 +642,17 @@ func main() {
 		fmt.Println("PORT not set in environment")
 		return
 	}
+	var err error
+	if privateKey, err = loadPrivateKey(); err != nil {
+		fmt.Println(err)
+		return
+	}
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc(outputRelative, outputHandler)
 	http.HandleFunc(authRelative, authHandler)
 	http.HandleFunc(logoutRelative, logoutHandler)
 
-	err := http.ListenAndServe(":"+port, nil)
-	if err != nil {
+	if err = http.ListenAndServe(":"+port, nil); err != nil {
 		fmt.Println(err)
 		return
 	}
