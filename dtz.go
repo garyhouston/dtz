@@ -457,7 +457,7 @@ queryLoop:
 
 func dateParam(param string) (*time.Location, error) {
 	if param == "" {
-		return nil, fmt.Errorf("Please set both of the timezone parameters.")
+		return nil, nil
 	}
 	num, err := strconv.Atoi(param)
 	if err == nil {
@@ -466,7 +466,7 @@ func dateParam(param string) (*time.Location, error) {
 		return time.FixedZone(param, (hours*60+mins)*60), nil
 	}
 	if strings.Index(param, "/") == -1 {
-		return nil, fmt.Errorf("Timezone should be either numeric or a tz database zone name.")
+		return nil, fmt.Errorf("Timezone should be either numeric or a tz database zone name with a slash.")
 	}
 	return time.LoadLocation(param)
 }
@@ -511,6 +511,16 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 	localZone, err := dateParam(trimmedField("location", r))
 	if err != nil {
 		preError(w, title, err)
+		return
+	}
+	if cameraZone == nil {
+		cameraZone = localZone
+	}
+	if localZone == nil {
+		localZone = cameraZone
+	}
+	if cameraZone == nil {
+		preMessage(w, title, "Please supply at least one time zone.")
 		return
 	}
 	filePrefix := "File:"
