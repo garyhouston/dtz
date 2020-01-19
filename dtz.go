@@ -6,9 +6,11 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"github.com/antonholmquist/jason"
 	"github.com/mrjones/oauth"
+	"html"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -40,15 +42,15 @@ func writeHead(w http.ResponseWriter, title string) {
 func preError(w http.ResponseWriter, title string, err error) {
 	writeHead(w, title)
 	writeString(w, "<body>\n")
-	writeString(w, err.Error())
-	writeString(w, "</body></html>")
+	writeString(w, html.EscapeString(err.Error()))
+	writeString(w, "\n</body></html>")
 }
 
 func preMessage(w http.ResponseWriter, title, msg string) {
 	writeHead(w, title)
 	writeString(w, "<body>\n")
-	writeString(w, msg)
-	writeString(w, "</body></html>")
+	writeString(w, html.EscapeString(msg))
+	writeString(w, "\n</body></html>")
 }
 
 const commonsPrefix = "https://commons.wikimedia.org/wiki/"
@@ -162,7 +164,7 @@ func extractInfo(page *jason.Object) (imageInfo, error) {
 	}
 	missing, err := obj.GetBoolean("missing")
 	if err == nil && missing {
-		return noinfo, fmt.Errorf("File not found")
+		return noinfo, errors.New("File not found.")
 	}
 	infoArray, err := obj.GetObjectArray("imageinfo")
 	if err != nil {
@@ -220,7 +222,7 @@ func getImageInfo(first, last string, client *mwclient.Client, w http.ResponseWr
 		return noinfo, noinfo, err
 	}
 	if len(pages) < 1 {
-		return noinfo, noinfo, fmt.Errorf("Empty pages array when requesting imageinfo")
+		return noinfo, noinfo, errors.New("Empty pages array when requesting imageinfo.")
 	}
 	imageInfo1, err := extractInfo(pages[0])
 	if err != nil {
@@ -322,13 +324,13 @@ func edit(title string, newDate time.Time, lastEdit *time.Time, authorFilter str
 		authorStart, authorEnd, dateStart, dateEnd := findPositions(text)
 		if authorFilter != "" {
 			if authorStart == -1 || strings.Index(strings.ToLower(text[authorStart:authorEnd]), authorFilter) == -1 {
-				return fmt.Errorf("author didn't match.")
+				return errors.New("author didn't match.")
 			}
 		}
 		dateStr := fmt.Sprintf("{{DTZ|%s}}", newDate.Format("2006-01-02T15:04:05-07"))
 		newText := text[:dateStart] + dateStr + text[dateEnd:]
 		if newText == text {
-			return fmt.Errorf("no change needed")
+			return errors.New("no change needed.")
 		}
 		editcfg := map[string]string{
 			"action":        "edit",
@@ -477,9 +479,25 @@ func dateParam(param string) (*time.Location, error) {
 		return time.FixedZone(param, (hours*60+mins)*60), nil
 	}
 	if strings.Index(param, "/") == -1 {
-		return nil, fmt.Errorf("Timezone should be either numeric or a tz database zone name with a slash.")
+		return nil, errors.New("Timezone should be either numeric or a tz database zone name with a slash.")
 	}
 	return time.LoadLocation(param)
+}
+
+func fileParam(param string) (string, error) {
+	filePrefix := "File:"
+	badChars := "/|"
+	param = strings.TrimPrefix(param, commonsPrefix)
+	if strings.ContainsAny(param, badChars) {
+		return "", errors.New("Filenames may not contain the characters " + badChars)
+	}
+	if len(param) == 0 {
+		return param, nil
+	}
+	if !strings.HasPrefix(param, filePrefix) {
+		param = filePrefix + param
+	}
+	return param, nil
 }
 
 func trimmedField(field string, r *http.Request) string {
@@ -493,25 +511,14 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 		preError(w, title, err)
 		return
 	}
-	client, err := mwclient.New("https://commons.wikimedia.org/w/api.php", "dtz; User:Ghouston")
-	if err != nil {
-		preError(w, title, err)
-		return
-	}
-	client.Maxlag.On = true
 	accessToken, err := r.Cookie(tokenCookie)
 	if err != nil {
-		preMessage(w, title, "Cookie "+tokenCookie+" not set for OAuth")
+		preMessage(w, title, "Cookie "+tokenCookie+" not set for OAuth.")
 		return
 	}
 	accessSecret, err := r.Cookie(secretCookie)
 	if err != nil {
-		preMessage(w, title, "Cookie "+secretCookie+" not set for OAuth")
-		return
-	}
-	err = authClient(client, accessToken.Value, accessSecret.Value)
-	if err != nil {
-		preError(w, title, err)
+		preMessage(w, title, "Cookie "+secretCookie+" not set for OAuth.")
 		return
 	}
 	cameraZone, err := dateParam(trimmedField("camera", r))
@@ -534,28 +541,38 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 		preMessage(w, title, "Please supply at least one time zone.")
 		return
 	}
-	filePrefix := "File:"
-	first := trimmedField("first", r)
-	first = strings.TrimPrefix(first, commonsPrefix)
-	if !strings.HasPrefix(first, filePrefix) {
-		first = filePrefix + first
+	first, err := fileParam(trimmedField("first", r))
+	if err != nil {
+		preError(w, title, err)
+		return
 	}
-	last := trimmedField("last", r)
-	last = strings.TrimPrefix(last, commonsPrefix)
-	if !strings.HasPrefix(last, filePrefix) {
-		last = filePrefix + last
+	last, err := fileParam(trimmedField("last", r))
+	if err != nil {
+		preError(w, title, err)
+		return
+	}
+	if first == "" {
+		first = last
+	}
+	if first == "" {
+		preMessage(w, title, "Please supply at least one file name.")
+		return
+	}
+	if last == "" {
+		last = first
 	}
 	authorFilter := strings.ToLower(trimmedField("author", r))
 	modelFilter := strings.ToLower(trimmedField("model", r))
-	if first == filePrefix {
-		first = last
-	}
-	if first == filePrefix {
-		preMessage(w, title, "Please supply at least one file name.\n")
+	client, err := mwclient.New("https://commons.wikimedia.org/w/api.php", "dtz; User:Ghouston")
+	if err != nil {
+		preError(w, title, err)
 		return
 	}
-	if last == filePrefix {
-		last = first
+	client.Maxlag.On = true
+	err = authClient(client, accessToken.Value, accessSecret.Value)
+	if err != nil {
+		preError(w, title, err)
+		return
 	}
 	imageInfo1, imageInfo2, err := getImageInfo(first, last, client, w)
 	if err != nil {
@@ -568,7 +585,7 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 		imageInfo2 = tmp
 	}
 	if imageInfo1.user != imageInfo2.user {
-		preMessage(w, title, "Two files must be uploaded by the same user.\n")
+		preMessage(w, title, "Two files must be uploaded by the same user.")
 		return
 	}
 	writeHead(w, title)
@@ -579,7 +596,7 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 func loadPrivateKey() (*rsa.PrivateKey, error) {
 	keyFile := os.Getenv("PrivateKeyFile")
 	if keyFile == "" {
-		return nil, fmt.Errorf("PrivateKeyFile not set in environment")
+		return nil, errors.New("PrivateKeyFile not set in environment.")
 	}
 	bytes, err := ioutil.ReadFile(keyFile)
 	if err != nil {
@@ -587,7 +604,7 @@ func loadPrivateKey() (*rsa.PrivateKey, error) {
 	}
 	block, _ := pem.Decode(bytes)
 	if block == nil || block.Type != "PRIVATE KEY" {
-		return nil, fmt.Errorf("Failed to parse PEM private key")
+		return nil, errors.New("Failed to parse PEM private key.")
 	}
 	pk, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
@@ -595,7 +612,7 @@ func loadPrivateKey() (*rsa.PrivateKey, error) {
 	}
 	pkey, ok := pk.(*rsa.PrivateKey)
 	if !ok {
-		return nil, fmt.Errorf("Failed to typecast public key")
+		return nil, errors.New("Failed to typecast public key.")
 	}
 	return pkey, nil
 }
@@ -609,7 +626,7 @@ func authHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	consumerToken := os.Getenv("ConsumerToken")
 	if consumerToken == "" {
-		preMessage(w, title, "OAuth consumer token not set in environment")
+		preMessage(w, title, "OAuth consumer token not set in environment.")
 		return
 	}
 	consumer := oauth.NewRSAConsumer(
@@ -633,7 +650,7 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 func authClient(client *mwclient.Client, oauthToken, oauthSecret string) error {
 	consumerToken := os.Getenv("ConsumerToken")
 	if consumerToken == "" {
-		return fmt.Errorf("OAuth consumer token not set in environment")
+		return errors.New("OAuth consumer token not set in environment.")
 	}
 	consumer := oauth.NewRSAConsumer(consumerToken, privateKey, oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
 	httpc, err := consumer.MakeHttpClient(&oauth.AccessToken{Token: oauthToken, Secret: oauthSecret})
@@ -647,7 +664,7 @@ func authClient(client *mwclient.Client, oauthToken, oauthSecret string) error {
 func authGetAccess(token, verifier string) (string, string, error) {
 	consumerToken := os.Getenv("ConsumerToken")
 	if consumerToken == "" {
-		return "", "", fmt.Errorf("OAuth consumer token not set in environment")
+		return "", "", errors.New("OAuth consumer token not set in environment.")
 	}
 	consumer := oauth.NewRSAConsumer(consumerToken, privateKey, oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
 	access, err := consumer.AuthorizeToken(&oauth.RequestToken{Token: token}, verifier)
