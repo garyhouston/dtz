@@ -60,7 +60,7 @@ const oauthAccessURL = "https://www.mediawiki.org/wiki/Special:OAuth/token"
 const oauthManageURL = "https://www.mediawiki.org/wiki/Special:OAuthManageMyGrants"
 const gitURL = "https://github.com/garyhouston/dtz"
 const talkURL = "https://commons.wikimedia.org/wiki/User_talk:Ghouston"
-const toolRelative = "/dtz/"
+const toolRelative = "/"
 const outputRelative = toolRelative + "output"
 const authRelative = toolRelative + "auth"
 const logoutRelative = toolRelative + "logout"
@@ -85,9 +85,6 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 			preError(w, title, err)
 			return
 		}
-		// Storing the tokens in cookies isn't ideal, since they can be read
-		// by any tool on the same domain. But I don't think they are useful
-		// without also knowing the consumer secret.
 		http.SetCookie(w, &http.Cookie{Name: tokenCookie, Path: toolRelative, Value: accessToken, HttpOnly: true, Secure: true})
 		http.SetCookie(w, &http.Cookie{Name: secretCookie, Path: toolRelative, Value: accessSecret, HttpOnly: true, Secure: true})
 		http.Redirect(w, r, toolRelative, http.StatusSeeOther)
@@ -612,7 +609,7 @@ func loadPrivateKey() (*rsa.PrivateKey, error) {
 	}
 	pkey, ok := pk.(*rsa.PrivateKey)
 	if !ok {
-		return nil, errors.New("Failed to typecast public key.")
+		return nil, errors.New("Failed to typecast private key.")
 	}
 	return pkey, nil
 }
