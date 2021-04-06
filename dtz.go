@@ -9,10 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/antonholmquist/jason"
+	"github.com/dgrijalva/jwt-go"
 	"github.com/mrjones/oauth"
 	"html"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -53,13 +53,14 @@ func preMessage(w http.ResponseWriter, title, msg string) {
 	writeString(w, "\n</body></html>")
 }
 
-const commonsPrefix = "https://commons.wikimedia.org/wiki/"
+const commonsPrefix = "https://commons.wikimedia.org/"
+const commonsWiki = commonsPrefix + "wiki/"
 const oauthRequestURL = "https://www.mediawiki.org/wiki/Special:OAuth/initiate"
 const oauthAuthorizeURL = "https://www.mediawiki.org/wiki/Special:OAuth/authorize"
 const oauthAccessURL = "https://www.mediawiki.org/wiki/Special:OAuth/token"
 const oauthManageURL = "https://www.mediawiki.org/wiki/Special:OAuthManageMyGrants"
 const gitURL = "https://github.com/garyhouston/dtz"
-const talkURL = "https://commons.wikimedia.org/wiki/User_talk:Ghouston"
+const talkURL = commonsWiki + "User_talk:Ghouston"
 const toolRelative = "/"
 const outputRelative = toolRelative + "output"
 const authRelative = toolRelative + "auth"
@@ -111,7 +112,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		writeString(w, "</p>\n")
 	}
 	writeString(w, "<p>This tool edits the dates and times of files on Wikimedia Commons,\nusing the ")
-	writeLink(w, commonsPrefix+"Template:DTZ", "DTZ")
+	writeLink(w, commonsWiki+"Template:DTZ", "DTZ")
 	writeString(w, ` template to display timezones.
 The date/times are taken from Exif and adjusted by the difference between the tizezone set in the camera
 and the timezone at the place the image was created, as specified below.</p>
@@ -349,7 +350,7 @@ func edit(title string, newDate time.Time, lastEdit *time.Time, authorFilter str
 }
 
 func printTitle(w http.ResponseWriter, title string) {
-	writeLink(w, commonsPrefix+url.PathEscape(title), title)
+	writeLink(w, commonsWiki+url.PathEscape(title), title)
 	writeString(w, " &mdash; ")
 }
 
@@ -484,7 +485,7 @@ func dateParam(param string) (*time.Location, error) {
 func fileParam(param string) (string, error) {
 	filePrefix := "File:"
 	badChars := "/|"
-	param = strings.TrimPrefix(param, commonsPrefix)
+	param = strings.TrimPrefix(param, commonsWiki)
 	if strings.ContainsAny(param, badChars) {
 		return "", errors.New("Filenames may not contain the characters " + badChars)
 	}
@@ -560,13 +561,13 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	authorFilter := strings.ToLower(trimmedField("author", r))
 	modelFilter := strings.ToLower(trimmedField("model", r))
-	client, err := mwclient.New("https://commons.wikimedia.org/w/api.php", "dtz; User:Ghouston")
+	client, err := mwclient.New(commonsPrefix+"w/api.php", "dtz; User:Ghouston")
 	if err != nil {
 		preError(w, title, err)
 		return
 	}
 	client.Maxlag.On = true
-	err = authClient(client, accessToken.Value, accessSecret.Value)
+	userName, err := authClient(client, accessToken.Value, accessSecret.Value)
 	if err != nil {
 		preError(w, title, err)
 		return
@@ -587,6 +588,9 @@ func outputHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	writeHead(w, title)
 	writeString(w, "<body>\n")
+	writeString(w, "<p>Editing as user ")
+	writeString(w, userName)
+	writeString(w, "</p>")
 	processRange(imageInfo1.uploadTime, imageInfo2.uploadTime, imageInfo1.user, cameraZone, localZone, authorFilter, modelFilter, client, w)
 }
 
@@ -595,7 +599,7 @@ func loadPrivateKey() (*rsa.PrivateKey, error) {
 	if keyFile == "" {
 		return nil, errors.New("PrivateKeyFile not set in environment.")
 	}
-	bytes, err := ioutil.ReadFile(keyFile)
+	bytes, err := os.ReadFile(keyFile)
 	if err != nil {
 		return nil, err
 	}
@@ -644,18 +648,22 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, toolRelative, http.StatusSeeOther)
 }
 
-func authClient(client *mwclient.Client, oauthToken, oauthSecret string) error {
+func authClient(client *mwclient.Client, oauthToken, oauthSecret string) (string, error) {
 	consumerToken := os.Getenv("ConsumerToken")
 	if consumerToken == "" {
-		return errors.New("OAuth consumer token not set in environment.")
+		return "", errors.New("OAuth consumer token not set in environment.")
 	}
 	consumer := oauth.NewRSAConsumer(consumerToken, privateKey, oauth.ServiceProvider{RequestTokenUrl: oauthRequestURL, AuthorizeTokenUrl: oauthAuthorizeURL, AccessTokenUrl: oauthAccessURL})
 	httpc, err := consumer.MakeHttpClient(&oauth.AccessToken{Token: oauthToken, Secret: oauthSecret})
 	if err != nil {
-		return err
+		return "", err
+	}
+	userName, err := checkUser(httpc)
+	if err != nil {
+		return "", err
 	}
 	client.SetHTTPClient(httpc)
-	return nil
+	return userName, nil
 }
 
 func authGetAccess(token, verifier string) (string, string, error) {
@@ -669,6 +677,59 @@ func authGetAccess(token, verifier string) (string, string, error) {
 		return "", "", err
 	}
 	return access.Token, access.Secret, nil
+}
+
+func checkUser(client *http.Client) (string, error) {
+	resp, err := client.Get(commonsWiki + "Special:OAuth/identify")
+	if err != nil {
+		return "", err
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return "", err
+	}
+	consumerSecret := os.Getenv("ConsumerSecret")
+	if consumerSecret == "" {
+		return "", errors.New("OAuth consumer secret not set in environment.")
+	}
+	token, err := jwt.Parse(string(body), func(token *jwt.Token) (interface{}, error) { return []byte(consumerSecret), nil })
+	if err != nil {
+		return "", err
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", errors.New("Claims not a map?")
+	}
+	blocked, ok := claims["blocked"].(bool)
+	if !ok {
+		return "", errors.New("Claims.blocked is not bool")
+	}
+	groups, ok := claims["groups"].([]interface{})
+	if !ok {
+		return "", errors.New("Claims.groups is not an array of interfaces")
+	}
+	autoconfirmed := false
+	for i := range groups {
+		group, ok := groups[i].(string)
+		if !ok {
+			return "", errors.New("Claims.groups[i] is not a string")
+		}
+		if group == "autoconfirmed" {
+			autoconfirmed = true
+		}
+	}
+	if !autoconfirmed {
+		return "", errors.New("User is not autoconfirmed.")
+	}
+	if blocked {
+		return "", errors.New("User is blocked.")
+	}
+	userName, ok := claims["username"].(string)
+	if !ok {
+		return "", errors.New("Claims.username is not a string")
+	}
+	return userName, nil
 }
 
 func main() {
