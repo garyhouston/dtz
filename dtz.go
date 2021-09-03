@@ -697,6 +697,9 @@ func checkUser(client *http.Client) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if !token.Valid {
+		return "", errors.New("Invalid OAuth/identify token.")
+	}
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
 		return "", errors.New("Claims not a map?")
