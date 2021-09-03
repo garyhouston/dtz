@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/antonholmquist/jason"
-	"github.com/dgrijalva/jwt-go/v4"
+	jwt "github.com/golang-jwt/jwt/v4"
 	"github.com/mrjones/oauth"
 	"html"
 	"io"

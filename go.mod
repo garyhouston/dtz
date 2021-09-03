@@ -5,6 +5,6 @@ go 1.16
 require (
 	cgt.name/pkg/go-mwclient v1.2.0
 	github.com/antonholmquist/jason v1.0.0
-	github.com/dgrijalva/jwt-go/v4 v4.0.0-preview1
+	github.com/golang-jwt/jwt/v4 v4.0.0
 	github.com/mrjones/oauth v0.0.0-20190623134757-126b35219450
 )
