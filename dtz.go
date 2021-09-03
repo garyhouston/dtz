@@ -114,7 +114,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	writeString(w, "<p>This tool edits the dates and times of files on Wikimedia Commons,\nusing the ")
 	writeLink(w, commonsWiki+"Template:DTZ", "DTZ")
 	writeString(w, ` template to display timezones.
-The date/times are taken from Exif and adjusted by the difference between the tizezone set in the camera
+The date/times are taken from Exif and adjusted by the difference between the timezone set in the camera
 and the timezone at the place the image was created, as specified below.</p>
 `)
 	writeString(w, `<form action="`)
