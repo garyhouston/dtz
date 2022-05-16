@@ -239,11 +239,24 @@ func getImageInfo(first, last string, client *mwclient.Client, w http.ResponseWr
 
 const batchSize = 100
 
+// for use when we only care about ASCII characters, such as tag
+// names, and don't want the length of a UTF8 string to change, as
+// strings.ToLower can do, e.g., Turkish İ -> i.
+func asciiToLower(s string) string {
+	runes := []rune(s)
+	for idx, ch := range runes {
+		if ch >= 'A' && ch <= 'Z' {
+			runes[idx] = ch + 32
+		}
+	}
+	return string(runes)
+}
+
 // Replace non-parsed sections in text, such as <!-- ... --> blocks, with spaces.
 func blankNonParsedSections(text string) string {
 	// Assume that unparsed sections don't nest, but don't assume
 	// that a matching end tag is present.
-	text = strings.ToLower(text) // Ignore tag case.
+	text = asciiToLower(text) // Ignore tag case.
 	startTags := []string{"<!--", "<nowiki>", "<pre>", "<math>"}
 	endTags := []string{"-->", "</nowiki>", "</pre>", "</math>"}
 	start := -1
